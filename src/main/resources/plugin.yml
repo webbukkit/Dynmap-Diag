@@ -1,0 +1,6 @@
+name: Dynmap-Diag
+main: org.dynmap.diag.DynmapDiagPlugin
+version: "${project.version}"
+author: mikeprimm
+depend: [ dynmap ]
+
