@@ -12,8 +12,11 @@ import org.bukkit.Chunk;
 import org.bukkit.World;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.server.PluginEnableEvent;
+import org.bukkit.event.world.ChunkLoadEvent;
+import org.bukkit.event.world.ChunkUnloadEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
@@ -85,6 +88,31 @@ public class DynmapDiagPlugin extends JavaPlugin {
      
     enum direction { XPLUS, ZPLUS, XMINUS, ZMINUS };
         
+    
+    /**
+     * Find caller that loaded chunk : first non-bukkit/non-MC class in stack
+     */
+    public String findCaller(StackTraceElement[] stk) {
+        for(int i = 0; i < stk.length; i++) {   /* Skip first two - its us */
+            String clsid = stk[i].getClassName();
+            if(clsid.startsWith("org.bukkit.") || clsid.startsWith("net.minecraft.") || 
+                    clsid.startsWith("java.") || clsid.startsWith("sun.") ||
+                    clsid.startsWith("org.dynmap.diag."))
+                continue;
+            return clsid + " : " + stk[i].getMethodName();
+        }
+        return "minecraft";
+    }
+    public String buildTrace(StackTraceElement[] stk) {
+        StringBuilder sb = new StringBuilder();
+        for(int i = 0; i < stk.length; i++) {
+            String clsid = stk[i].getClassName();
+            if(clsid.startsWith("java.") || clsid.startsWith("sun.") || clsid.startsWith("org.dynmap.diag."))
+                continue;
+            sb.append("\n" + clsid + " :" + stk[i].getMethodName() + " (" + stk[i].getFileName() + ":" + stk[i].getLineNumber() + ")");
+        }
+        return sb.toString();
+    }
     /**
      * Find all contiguous blocks, set in target and clear in source
      */
@@ -122,147 +150,177 @@ public class DynmapDiagPlugin extends JavaPlugin {
         int poly_index = 0; /* Index of polygon for given faction */
         String label = "Loaded Chunks";
         
-        Chunk[] chunks = w.getLoadedChunks();
-        
-        LinkedList<Chunk> nodevals = new LinkedList<Chunk>();
-        TileFlags curblks = new TileFlags();
-    	/* Loop through blocks: set flags on blockmaps */
-    	for(Chunk c : chunks) {
-    	    curblks.setFlag(c.getX(), c.getZ(), true); /* Set flag for block */
-    	    nodevals.addLast(c);
-    	}
-        /* Loop through until we don't find more areas */
-        while(nodevals != null) {
-            LinkedList<Chunk> ournodes = null;
-            LinkedList<Chunk> newlist = null;
-            TileFlags ourblks = null;
-            int minx = Integer.MAX_VALUE;
-            int minz = Integer.MAX_VALUE;
-            for(Chunk node : nodevals) {
-                int nodex = node.getX();
-                int nodez = node.getZ();
-                /* If we need to start shape, and this block is not part of one yet */
-                if((ourblks == null) && curblks.getFlag(nodex, nodez)) {
-                    ourblks = new TileFlags();  /* Create map for shape */
-                    ournodes = new LinkedList<Chunk>();
-                    floodFillTarget(curblks, ourblks, nodex, nodez);   /* Copy shape */
-                    ournodes.add(node); /* Add it to our node list */
-                    minx = nodex; minz = nodez;
-                }
-                /* If shape found, and we're in it, add to our node list */
-                else if((ourblks != null) && ourblks.getFlag(nodex, nodez)) {
-                    ournodes.add(node);
-                    if(nodex < minx) {
-                        minx = nodex; minz = nodez;
-                    }
-                    else if((nodex == minx) && (nodez < minz)) {
-                        minz = nodez;
-                    }
-                }
-                else {  /* Else, keep it in the list for the next polygon */
-                    if(newlist == null) newlist = new LinkedList<Chunk>();
-                    newlist.add(node);
+        Chunk[] chks = w.getLoadedChunks();
+        /* Now, find who loaded these - group into sets */
+        HashMap<String, LinkedList<Chunk>> chunks_by_loader = new HashMap<String, LinkedList<Chunk>>();
+        for(Chunk c : chks) {
+            String chunkid = idForChunk(c);
+            if(c.isLoaded() == false) {
+                log.info("Loaded chunk included an unloaded one! " + chunkid);
+                continue;
+            }
+            ChunkRecord rec = chunkrecs.get(chunkid);
+            String id;
+            if(rec != null) {
+                id = buildTrace(rec.load_stack);
+                if(rec.unload_stack != null) {
+                    log.info("Loaded chunk " + chunkid + " was loaded by: " + id + ", unloaded by: " + buildTrace(rec.unload_stack));
                 }
             }
-            nodevals = newlist; /* Replace list (null if no more to process) */
-            if(ourblks != null) {
-                /* Trace outline of blocks - start from minx, minz going to x+ */
-                int init_x = minx;
-                int init_z = minz;
-                int cur_x = minx;
-                int cur_z = minz;
-                direction dir = direction.XPLUS;
-                ArrayList<int[]> linelist = new ArrayList<int[]>();
-                linelist.add(new int[] { init_x, init_z } ); // Add start point
-                while((cur_x != init_x) || (cur_z != init_z) || (dir != direction.ZMINUS)) {
-                    switch(dir) {
-                        case XPLUS: /* Segment in X+ direction */
-                            if(!ourblks.getFlag(cur_x+1, cur_z)) { /* Right turn? */
-                                linelist.add(new int[] { cur_x+1, cur_z }); /* Finish line */
-                                dir = direction.ZPLUS;  /* Change direction */
-                            }
-                            else if(!ourblks.getFlag(cur_x+1, cur_z-1)) {  /* Straight? */
-                                cur_x++;
-                            }
-                            else {  /* Left turn */
-                                linelist.add(new int[] { cur_x+1, cur_z }); /* Finish line */
-                                dir = direction.ZMINUS;
-                                cur_x++; cur_z--;
-                            }
-                            break;
-                        case ZPLUS: /* Segment in Z+ direction */
-                            if(!ourblks.getFlag(cur_x, cur_z+1)) { /* Right turn? */
-                                linelist.add(new int[] { cur_x+1, cur_z+1 }); /* Finish line */
-                                dir = direction.XMINUS;  /* Change direction */
-                            }
-                            else if(!ourblks.getFlag(cur_x+1, cur_z+1)) {  /* Straight? */
-                                cur_z++;
-                            }
-                            else {  /* Left turn */
-                                linelist.add(new int[] { cur_x+1, cur_z+1 }); /* Finish line */
-                                dir = direction.XPLUS;
-                                cur_x++; cur_z++;
-                            }
-                            break;
-                        case XMINUS: /* Segment in X- direction */
-                            if(!ourblks.getFlag(cur_x-1, cur_z)) { /* Right turn? */
-                                linelist.add(new int[] { cur_x, cur_z+1 }); /* Finish line */
-                                dir = direction.ZMINUS;  /* Change direction */
-                            }
-                            else if(!ourblks.getFlag(cur_x-1, cur_z+1)) {  /* Straight? */
-                                cur_x--;
-                            }
-                            else {  /* Left turn */
-                                linelist.add(new int[] { cur_x, cur_z+1 }); /* Finish line */
-                                dir = direction.ZPLUS;
-                                cur_x--; cur_z++;
-                            }
-                            break;
-                        case ZMINUS: /* Segment in Z- direction */
-                            if(!ourblks.getFlag(cur_x, cur_z-1)) { /* Right turn? */
-                                linelist.add(new int[] { cur_x, cur_z }); /* Finish line */
-                                dir = direction.XPLUS;  /* Change direction */
-                            }
-                            else if(!ourblks.getFlag(cur_x-1, cur_z-1)) {  /* Straight? */
-                                cur_z--;
-                            }
-                            else {  /* Left turn */
-                                linelist.add(new int[] { cur_x, cur_z }); /* Finish line */
-                                dir = direction.XMINUS;
-                                cur_x--; cur_z--;
-                            }
-                            break;
+            else {
+                id = "unknown";
+            }
+            LinkedList<Chunk> ll = chunks_by_loader.get(id);
+            if(ll == null) {
+                ll = new LinkedList<Chunk>();
+                chunks_by_loader.put(id, ll);
+            }
+            ll.add(c);
+        }
+        /* Now, one outline set for each loader */
+        for(String loaderid : chunks_by_loader.keySet()) {
+            label = "Loaded by: " + loaderid;
+            LinkedList<Chunk> ourchunks = chunks_by_loader.get(loaderid);
+            LinkedList<Chunk> nodevals = new LinkedList<Chunk>();
+            TileFlags curblks = new TileFlags();
+            /* Loop through blocks: set flags on blockmaps */
+            for(Chunk c : ourchunks) {
+                curblks.setFlag(c.getX(), c.getZ(), true); /* Set flag for block */
+                nodevals.addLast(c);
+            }
+            /* Loop through until we don't find more areas */
+            while(nodevals != null) {
+                LinkedList<Chunk> ournodes = null;
+                LinkedList<Chunk> newlist = null;
+                TileFlags ourblks = null;
+                int minx = Integer.MAX_VALUE;
+                int minz = Integer.MAX_VALUE;
+                for(Chunk node : nodevals) {
+                    int nodex = node.getX();
+                    int nodez = node.getZ();
+                    /* If we need to start shape, and this block is not part of one yet */
+                    if((ourblks == null) && curblks.getFlag(nodex, nodez)) {
+                        ourblks = new TileFlags();  /* Create map for shape */
+                        ournodes = new LinkedList<Chunk>();
+                        floodFillTarget(curblks, ourblks, nodex, nodez);   /* Copy shape */
+                        ournodes.add(node); /* Add it to our node list */
+                        minx = nodex; minz = nodez;
+                    }
+                    /* If shape found, and we're in it, add to our node list */
+                    else if((ourblks != null) && ourblks.getFlag(nodex, nodez)) {
+                        ournodes.add(node);
+                        if(nodex < minx) {
+                            minx = nodex; minz = nodez;
+                        }
+                        else if((nodex == minx) && (nodez < minz)) {
+                            minz = nodez;
+                        }
+                    }
+                    else {  /* Else, keep it in the list for the next polygon */
+                        if(newlist == null) newlist = new LinkedList<Chunk>();
+                        newlist.add(node);
                     }
                 }
-                /* Build information for specific area */
-                String polyid = "Chunks__" + w.getName() + "__" + poly_index;
-                int sz = linelist.size();
-                x = new double[sz];
-                z = new double[sz];
-                for(int i = 0; i < sz; i++) {
-                    int[] line = linelist.get(i);
-                    x[i] = (double)line[0] * 16.0;
-                    z[i] = (double)line[1] * 16.0;
-                }
-                /* Find existing one */
-                AreaMarker m = resareas.remove(polyid); /* Existing area? */
-                if(m == null) {
-                    m = set.createAreaMarker(polyid, label, false, w.getName(), x, z, false);
+                nodevals = newlist; /* Replace list (null if no more to process) */
+                if(ourblks != null) {
+                    /* Trace outline of blocks - start from minx, minz going to x+ */
+                    int init_x = minx;
+                    int init_z = minz;
+                    int cur_x = minx;
+                    int cur_z = minz;
+                    direction dir = direction.XPLUS;
+                    ArrayList<int[]> linelist = new ArrayList<int[]>();
+                    linelist.add(new int[] { init_x, init_z } ); // Add start point
+                    while((cur_x != init_x) || (cur_z != init_z) || (dir != direction.ZMINUS)) {
+                        switch(dir) {
+                            case XPLUS: /* Segment in X+ direction */
+                                if(!ourblks.getFlag(cur_x+1, cur_z)) { /* Right turn? */
+                                    linelist.add(new int[] { cur_x+1, cur_z }); /* Finish line */
+                                    dir = direction.ZPLUS;  /* Change direction */
+                                }
+                                else if(!ourblks.getFlag(cur_x+1, cur_z-1)) {  /* Straight? */
+                                    cur_x++;
+                                }
+                                else {  /* Left turn */
+                                    linelist.add(new int[] { cur_x+1, cur_z }); /* Finish line */
+                                    dir = direction.ZMINUS;
+                                    cur_x++; cur_z--;
+                                }
+                                break;
+                            case ZPLUS: /* Segment in Z+ direction */
+                                if(!ourblks.getFlag(cur_x, cur_z+1)) { /* Right turn? */
+                                    linelist.add(new int[] { cur_x+1, cur_z+1 }); /* Finish line */
+                                    dir = direction.XMINUS;  /* Change direction */
+                                }
+                                else if(!ourblks.getFlag(cur_x+1, cur_z+1)) {  /* Straight? */
+                                    cur_z++;
+                                }
+                                else {  /* Left turn */
+                                    linelist.add(new int[] { cur_x+1, cur_z+1 }); /* Finish line */
+                                    dir = direction.XPLUS;
+                                    cur_x++; cur_z++;
+                                }
+                                break;
+                            case XMINUS: /* Segment in X- direction */
+                                if(!ourblks.getFlag(cur_x-1, cur_z)) { /* Right turn? */
+                                    linelist.add(new int[] { cur_x, cur_z+1 }); /* Finish line */
+                                    dir = direction.ZMINUS;  /* Change direction */
+                                }
+                                else if(!ourblks.getFlag(cur_x-1, cur_z+1)) {  /* Straight? */
+                                    cur_x--;
+                                }
+                                else {  /* Left turn */
+                                    linelist.add(new int[] { cur_x, cur_z+1 }); /* Finish line */
+                                    dir = direction.ZPLUS;
+                                    cur_x--; cur_z++;
+                                }
+                                break;
+                            case ZMINUS: /* Segment in Z- direction */
+                                if(!ourblks.getFlag(cur_x, cur_z-1)) { /* Right turn? */
+                                    linelist.add(new int[] { cur_x, cur_z }); /* Finish line */
+                                    dir = direction.XPLUS;  /* Change direction */
+                                }
+                                else if(!ourblks.getFlag(cur_x-1, cur_z-1)) {  /* Straight? */
+                                    cur_z--;
+                                }
+                                else {  /* Left turn */
+                                    linelist.add(new int[] { cur_x, cur_z }); /* Finish line */
+                                    dir = direction.XMINUS;
+                                    cur_x--; cur_z--;
+                                }
+                                break;
+                        }
+                    }
+                    /* Build information for specific area */
+                    String polyid = "Chunks__" + w.getName() + "__" + poly_index;
+                    int sz = linelist.size();
+                    x = new double[sz];
+                    z = new double[sz];
+                    for(int i = 0; i < sz; i++) {
+                        int[] line = linelist.get(i);
+                        x[i] = (double)line[0] * 16.0;
+                        z[i] = (double)line[1] * 16.0;
+                    }
+                    /* Find existing one */
+                    AreaMarker m = resareas.remove(polyid); /* Existing area? */
                     if(m == null) {
-                        info("error adding area marker " + polyid);
-                        return;
+                        m = set.createAreaMarker(polyid, label, false, w.getName(), x, z, false);
+                        if(m == null) {
+                            info("error adding area marker " + polyid);
+                            return;
+                        }
                     }
+                    else {
+                        m.setCornerLocations(x, z); /* Replace corner locations */
+                        m.setLabel(label);   /* Update label */
+                    }
+                    /* Set line and fill properties */
+                    addStyle(label, m);
+
+                    /* Add to map */
+                    newmap.put(polyid, m);
+                    poly_index++;
                 }
-                else {
-                    m.setCornerLocations(x, z); /* Replace corner locations */
-                    m.setLabel(label);   /* Update label */
-                }
-                /* Set line and fill properties */
-                addStyle(label, m);
-    
-                /* Add to map */
-                newmap.put(polyid, m);
-                poly_index++;
             }
         }
     }
@@ -287,6 +345,19 @@ public class DynmapDiagPlugin extends JavaPlugin {
         
     }
     
+    private static class ChunkRecord {
+        long    load_time;
+        StackTraceElement[] load_stack;
+        long    unload_time;
+        StackTraceElement[] unload_stack;
+    }
+    
+    private HashMap<String, ChunkRecord> chunkrecs = new HashMap<String, ChunkRecord>();
+    
+    private String idForChunk(Chunk c) {
+        return c.getWorld().getName() + ":" + c.getX() + "," + c.getZ();
+    }
+    
     private class OurServerListener implements Listener {
         @SuppressWarnings("unused")
         @EventHandler
@@ -297,6 +368,29 @@ public class DynmapDiagPlugin extends JavaPlugin {
                 if(dynmap.isEnabled())
                     activate();
             }
+        }
+        @EventHandler(priority=EventPriority.MONITOR)
+        public void onChunkLoad(ChunkLoadEvent event) {
+            Chunk c = event.getChunk();
+            /* Get stack */
+            ChunkRecord rec = new ChunkRecord();
+            rec.load_stack = Thread.currentThread().getStackTrace();
+            rec.load_time = System.currentTimeMillis();
+            rec.unload_stack = null;
+            rec.unload_time = 0;
+            String chunkid = idForChunk(c);
+            chunkrecs.put(chunkid,  rec);
+        }
+        @EventHandler(priority=EventPriority.MONITOR)
+        public void onChunkUnload(ChunkUnloadEvent event) {
+            Chunk c = event.getChunk();
+            String chunkid = idForChunk(c);
+            ChunkRecord rec = chunkrecs.get(chunkid);
+            if(rec == null) {
+                return;
+            }
+            rec.unload_time = System.currentTimeMillis();
+            rec.unload_stack = Thread.currentThread().getStackTrace();
         }
     }
     
