@@ -4,16 +4,21 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.bukkit.Chunk;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.entity.Entity;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.server.PluginEnableEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.event.world.ChunkUnloadEvent;
@@ -22,7 +27,9 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.PluginManager;
 import org.dynmap.DynmapAPI;
 import org.dynmap.markers.AreaMarker;
+import org.dynmap.markers.Marker;
 import org.dynmap.markers.MarkerAPI;
+import org.dynmap.markers.MarkerIcon;
 import org.dynmap.markers.MarkerSet;
 
 public class DynmapDiagPlugin extends JavaPlugin {
@@ -68,6 +75,7 @@ public class DynmapDiagPlugin extends JavaPlugin {
     }
     
     private Map<String, AreaMarker> resareas = new HashMap<String, AreaMarker>();
+    private Map<String, Marker> resmarkers = new HashMap<String, Marker>();
     
     private boolean isVisible(String id, String worldname) {
         return true;
@@ -142,6 +150,43 @@ public class DynmapDiagPlugin extends JavaPlugin {
         return cnt;
     }
     
+    /* Handle entities on specific world */
+    private void handleEntitiesOnWorld(World w, Map<String, Marker> newmap) {
+        int idx = 0;
+        
+        List<Entity> ents = w.getEntities();
+
+        info("entities in " + w.getName() + ": " + ents.size());
+        for(Entity ent : w.getEntities()) {
+            Location loc = ent.getLocation();
+            /* See if entity that is in unloaded chunk */
+            if(w.isChunkLoaded(loc.getBlockX() >> 4, loc.getBlockZ() >> 4) == false) {
+                info("orpahn: " + ent.toString());
+                String id = "orphan_" + idx;
+                Marker m = resmarkers.remove(id);
+                String trc;
+                EntityRecord rec = entrecs.get(ent.getEntityId());
+                if(rec != null)
+                    trc = buildTrace(rec.load_stack);
+                else
+                    trc = "unknown loader";
+                
+                if(m == null) { /* Not found?  Need new one */
+                    m = set.createMarker(id, ent.getClass().getName(), w.getName(), 
+                            loc.getX(), loc.getY(), loc.getZ(), 
+                            markerapi.getMarkerIcon(MarkerIcon.DEFAULT), false);
+                }
+                else {  /* Else, update position if needed */
+                    m.setLocation(w.getName(), loc.getX(), loc.getY(), loc.getZ());
+                    m.setLabel(ent.getClass().getName());
+                }
+                m.setDescription("Class:" + ent.getClass().getName() + "<br/>" + trc);
+                
+                newmap.put(id, m);
+                idx++;
+            }
+        }
+    }
     
     /* Handle chunks on specific world */
     private void handleChunksOnWorld(World w, Map<String, AreaMarker> newmap) {
@@ -328,18 +373,24 @@ public class DynmapDiagPlugin extends JavaPlugin {
     /* Update Chunk information */
     private void updateChunks() {
         Map<String,AreaMarker> newmap = new HashMap<String,AreaMarker>(); /* Build new map */
+        Map<String, Marker> newmap2 = new HashMap<String,Marker>();
         
         /* Loop through worlds */
         for(World w : getServer().getWorlds()) {
             handleChunksOnWorld(w, newmap);
+            handleEntitiesOnWorld(w, newmap2);
         }
         
         /* Now, review old map - anything left is gone */
         for(AreaMarker oldm : resareas.values()) {
             oldm.deleteMarker();
         }
+        for(Marker oldm : resmarkers.values()) {
+            oldm.deleteMarker();
+        }
         /* And replace with new map */
         resareas = newmap;
+        resmarkers = newmap2;
         
         getServer().getScheduler().scheduleSyncDelayedTask(this, new ChunkUpdate(), updperiod);
         
@@ -351,8 +402,13 @@ public class DynmapDiagPlugin extends JavaPlugin {
         long    unload_time;
         StackTraceElement[] unload_stack;
     }
-    
     private HashMap<String, ChunkRecord> chunkrecs = new HashMap<String, ChunkRecord>();
+
+    private static class EntityRecord {
+        long    load_time;
+        StackTraceElement[] load_stack;
+    }
+    private HashMap<Integer, EntityRecord> entrecs = new HashMap<Integer, EntityRecord>();
     
     private String idForChunk(Chunk c) {
         return c.getWorld().getName() + ":" + c.getX() + "," + c.getZ();
@@ -391,6 +447,18 @@ public class DynmapDiagPlugin extends JavaPlugin {
             }
             rec.unload_time = System.currentTimeMillis();
             rec.unload_stack = Thread.currentThread().getStackTrace();
+        }
+        @EventHandler(priority=EventPriority.MONITOR)
+        public void onCreatureSpawn(CreatureSpawnEvent event) {
+            if(event.isCancelled()) return;
+            EntityRecord rec = new EntityRecord();
+            rec.load_time = System.currentTimeMillis();
+            rec.load_stack = Thread.currentThread().getStackTrace();
+            entrecs.put(event.getEntity().getEntityId(),  rec);
+        }
+        @EventHandler(priority=EventPriority.MONITOR)
+        public void onEntityDeath(EntityDeathEvent event) {
+            entrecs.remove(event.getEntity().getEntityId());
         }
     }
     
