@@ -3,4 +3,20 @@ main: org.dynmap.diag.DynmapDiagPlugin
 version: "${project.version}"
 author: mikeprimm
 depend: [ dynmap ]
+commands:
+  dyndiag:
+    description: Controls Dynmap-Diag.
+    usage: |
+           /<command> show chunks - enable chunks layer
+           /<command> show entities - enable entities layer
+           /<command> hide chunks - disable chunks layer
+           /<command> hide entities - disable entities layer
+           /<command> showstack chunks - show stacks for chunks layer
+           /<command> showstack entities - show stacks for entities layer
+           /<command> hidestack chunks - hide stacks for chunks layer
+           /<command> hidestack entities - hide stacks for entities layer
+           /<command> pause - disable automatic updating of all layers
+           /<command> unpause - enable automatic updating of all layers
+           /<command> update - update all layers immediately
+
 

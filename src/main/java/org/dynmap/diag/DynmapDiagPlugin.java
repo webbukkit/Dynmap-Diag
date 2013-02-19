@@ -13,6 +13,8 @@ import java.util.logging.Logger;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.event.EventHandler;
@@ -48,6 +50,7 @@ public class DynmapDiagPlugin extends JavaPlugin {
     boolean stop;
     boolean include_stack_chunk;
     boolean include_stack_entities;
+    boolean paused;
     private static final String NOPLUGINMSG = "Associated plugins(s):<br>None (Loaded by CraftBukkit)<br>";
     
     private class AreaStyle {
@@ -79,8 +82,12 @@ public class DynmapDiagPlugin extends JavaPlugin {
 
     private class ChunkUpdate implements Runnable {
         public void run() {
-            if(!stop)
-                updateChunks();
+            if(!stop) {
+                if(!paused) {
+                    updateChunks();
+                }
+                getServer().getScheduler().scheduleSyncDelayedTask(DynmapDiagPlugin.this, new ChunkUpdate(), updperiod);
+            }
         }
     }
     
@@ -443,8 +450,6 @@ public class DynmapDiagPlugin extends JavaPlugin {
         resareas = newmap;
         resmarkers = newmap2;
         
-        getServer().getScheduler().scheduleSyncDelayedTask(this, new ChunkUpdate(), updperiod);
-        
     }
     private static class Record {
         StackTraceElement[] load_stack;
@@ -529,10 +534,24 @@ public class DynmapDiagPlugin extends JavaPlugin {
             return;
         }
         /* Load configuration */
-        FileConfiguration cfg = getConfig();
+        cfg = getConfig();
         cfg.options().copyDefaults(true);   /* Load defaults, if needed */
         this.saveConfig();  /* Save updates, if needed */
+
+        initialize();
+
+        /* Set up update job - based on perion */
+        int per = cfg.getInt("update.chunkperiod", 30);
+        if(per < 15) per = 15;
+        updperiod = (per*20);
+        stop = false;
         
+        getServer().getScheduler().scheduleSyncDelayedTask(this, new ChunkUpdate(), 40);   /* First time is 2 seconds */
+        
+        info("version " + this.getDescription().getVersion() + " is activated");
+    }
+    
+    private void initialize() {
         /* Now, add marker set for chunks (make it transient) */
         if(cfg.getBoolean("chunklayer.enabled", true)) {
             set = markerapi.getMarkerSet("diags_chunks.markerset");
@@ -555,6 +574,15 @@ public class DynmapDiagPlugin extends JavaPlugin {
             
             this.include_stack_chunk = cfg.getBoolean("chunklayer.include-stack", false);
         }
+        else if(set != null) {
+            for(AreaMarker am : resareas.values()) {
+                am.deleteMarker();
+            }
+            resareas.clear();
+            set.deleteMarkerSet();
+            set = null;
+            resareas.clear();
+        }
         /* Now, add marker set for entities (make it transient) */
         if(cfg.getBoolean("entitylayer.enabled", true)) {
             entityset = markerapi.getMarkerSet("diags_entities.markerset");
@@ -574,16 +602,14 @@ public class DynmapDiagPlugin extends JavaPlugin {
             entityset.setHideByDefault(cfg.getBoolean("entitylayer.hidebydefault", false));
             this.include_stack_entities = cfg.getBoolean("entitylayer.include-stack", false);
         }
-        
-        /* Set up update job - based on perion */
-        int per = cfg.getInt("update.chunkperiod", 30);
-        if(per < 15) per = 15;
-        updperiod = (per*20);
-        stop = false;
-        
-        getServer().getScheduler().scheduleSyncDelayedTask(this, new ChunkUpdate(), 40);   /* First time is 2 seconds */
-        
-        info("version " + this.getDescription().getVersion() + " is activated");
+        else if(entityset != null) {
+            for(Marker m : resmarkers.values()) {
+                m.deleteMarker();
+            }
+            resmarkers.clear();
+            entityset.deleteMarkerSet();
+            entityset = null;
+        }
     }
 
     public void onDisable() {
@@ -596,7 +622,103 @@ public class DynmapDiagPlugin extends JavaPlugin {
             entityset = null;
         }
         resareas.clear();
+        resmarkers.clear();
+
         stop = true;
     }
+    @Override
+    public boolean onCommand(CommandSender sender, Command cmd, String commandLabel, String[] args) {
+        if(cmd.getName().equals("dyndiag")) {
+            if(sender.isOp() == false) {
+                sender.sendMessage("Only operators can use this command");
+                return false;
+            }
+            if(args.length < 2) {
+                if(args.length == 1) {
+                    if(args[0].equals("pause")) {
+                        paused = true;
+                        sender.sendMessage("Layer updates are paused");
+                    }
+                    else if(args[0].equals("unpause")) {
+                        paused = false;
+                        sender.sendMessage("Layer updates are unpaused");
+                        updateChunks();
+                    }
+                    else if(args[0].equals("update")) {
+                        updateChunks();
+                        sender.sendMessage("Layers updated");
+                    }
+                    else {
+                        return false;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            if(args[0].equals("show")) {
+                if(args[1].equals("chunks")) {
+                    cfg.set("chunklayer.enabled", true);
+                    sender.sendMessage("Chunk layer enabled");
+                }
+                else if(args[1].equals("entities")) {
+                    cfg.set("entitylayer.enabled", true);
+                    sender.sendMessage("Entity layer enabled");
+                }
+                else {
+                    sender.sendMessage("Unknown layer: " + args[1]);
+                    return false;
+                }
+            }
+            else if(args[0].equals("hide")) {
+                if(args[1].equals("chunks")) {
+                    cfg.set("chunklayer.enabled", false);
+                    sender.sendMessage("Chunk layer disabled");
+                }
+                else if(args[1].equals("entities")) {
+                    cfg.set("entitylayer.enabled", false);
+                    sender.sendMessage("Entity layer disabled");
+                }
+                else {
+                    sender.sendMessage("Unknown layer: " + args[1]);
+                    return false;
+                }
+            }
+            else if(args[0].equals("showstack")) {
+                if(args[1].equals("chunks")) {
+                    cfg.set("chunklayer.include-stack", true);
+                    sender.sendMessage("Chunk layer will include call stack");
+                }
+                else if(args[1].equals("entities")) {
+                    cfg.set("entitylayer.include-stack", true);
+                    sender.sendMessage("Entity layer will include call stack");
+                }
+                else {
+                    sender.sendMessage("Unknown layer: " + args[1]);
+                    return false;
+                }
+            }
+            else if(args[0].equals("hidestack")) {
+                if(args[1].equals("chunks")) {
+                    cfg.set("chunklayer.include-stack", false);
+                    sender.sendMessage("Chunk layer will notinclude call stack");
+                }
+                else if(args[1].equals("entities")) {
+                    cfg.set("entitylayer.include-stack", false);
+                    sender.sendMessage("Entity layer will notinclude call stack");
+                }
+                else {
+                    sender.sendMessage("Unknown layer: " + args[1]);
+                    return false;
+                }
+            }
+            this.saveConfig();  /* Save updates, if needed */
+            
+            this.initialize();
+            
+            this.updateChunks();
 
+            return true;
+        }
+        return false;
+    }
 }
