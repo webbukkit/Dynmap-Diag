@@ -5,6 +5,8 @@ update:
   chunkperiod: 30
 
 chunklayer:
+  # If true, layer is enabled
+  enabled: true
   name: "Chunks Loaded"
   # Make layer hidden by default
   hidebydefault: true
@@ -12,11 +14,30 @@ chunklayer:
   layerprio: 2
   # (optional) set minimum zoom level before layer is visible (0 = defalt, always visible)
   minzoom: 0
+  # If true, include call stack in chunk area description text
+  include-stack: false
   
+entitylayer:
+  # If true, layer is enabled
+  enabled: true
+  name: "Leaked Entities"
+  # Make layer hidden by default
+  hidebydefault: true
+  # ordering priority in layer menu (low goes before high - default is 0)
+  layerprio: 3
+  # (optional) set minimum zoom level before layer is visible (0 = defalt, always visible)
+  minzoom: 0
+  # If true, include call stack in chunk area description text
+  include-stack: false
+  # Marker for leaked entities
+  marker: exclamation
+
 chunkstyle:
-  strokeColor: "#00007F"
+  strokeColor: "#FF0000"
   strokeOpacity: 0.8
   strokeWeight: 3
-  fillColor: "#00007F"
+  fillColor: "#FF0000"
   fillOpacity: 0.35
+  nonPluginStrokeColor: "#0000FF"
+  nonPluginFillColor: "#0000FF"
   

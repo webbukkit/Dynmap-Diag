@@ -3,8 +3,9 @@ package org.dynmap.diag;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -40,22 +41,31 @@ public class DynmapDiagPlugin extends JavaPlugin {
     MarkerAPI markerapi;
     FileConfiguration cfg;
     MarkerSet set;
+    MarkerSet entityset;
     long updperiod;
     AreaStyle defstyle;
+    MarkerIcon entitymarker;
     boolean stop;
+    boolean include_stack_chunk;
+    boolean include_stack_entities;
+    private static final String NOPLUGINMSG = "Associated plugins(s):<br>None (Loaded by CraftBukkit)<br>";
     
     private class AreaStyle {
         String strokecolor;
+        String nopluginstrokecolor;
         double strokeopacity;
         int strokeweight;
         String fillcolor;
+        String nopluginfillcolor;
         double fillopacity;
 
         AreaStyle(FileConfiguration cfg, String path) {
             strokecolor = cfg.getString(path+".strokeColor", "#FF0000");
+            nopluginstrokecolor = cfg.getString(path+".nonPluginStrokeColor", "#0000FF");
             strokeopacity = cfg.getDouble(path+".strokeOpacity", 0.8);
             strokeweight = cfg.getInt(path+".strokeWeight", 3);
             fillcolor = cfg.getString(path+".fillColor", "#FF0000");
+            nopluginfillcolor = cfg.getString(path+".nonPluginFillColor", "#0000FF");
             fillopacity = cfg.getDouble(path+".fillOpacity", 0.35);
         }
     }
@@ -76,18 +86,20 @@ public class DynmapDiagPlugin extends JavaPlugin {
     
     private Map<String, AreaMarker> resareas = new HashMap<String, AreaMarker>();
     private Map<String, Marker> resmarkers = new HashMap<String, Marker>();
-    
-    private boolean isVisible(String id, String worldname) {
-        return true;
-    }
-        
-    private void addStyle(String resid, AreaMarker m) {
+            
+    private void addStyle(AreaMarker m, boolean plugin) {
         AreaStyle as = defstyle;
         int sc = 0xFF0000;
         int fc = 0xFF0000;
         try {
-            sc = Integer.parseInt(as.strokecolor.substring(1), 16);
-            fc = Integer.parseInt(as.fillcolor.substring(1), 16);
+            if(plugin) {
+                sc = Integer.parseInt(as.strokecolor.substring(1), 16);
+                fc = Integer.parseInt(as.fillcolor.substring(1), 16);
+            }
+            else {
+                sc = Integer.parseInt(as.nopluginstrokecolor.substring(1), 16);
+                fc = Integer.parseInt(as.nopluginfillcolor.substring(1), 16);
+            }
         } catch (NumberFormatException nfx) {
         }
         m.setLineStyle(as.strokeweight, as.strokeopacity, sc);
@@ -111,15 +123,46 @@ public class DynmapDiagPlugin extends JavaPlugin {
         }
         return "minecraft";
     }
-    public String buildTrace(StackTraceElement[] stk) {
+    public String buildTrace(Record rec, IdentityHashMap<ClassLoader, String> cload, boolean incstack) {
         StringBuilder sb = new StringBuilder();
+        String plugin = null;
+        String lastplugin = null;
+        StackTraceElement[] stk = rec.load_stack;
+        rec.pluginfound = false;
         for(int i = 0; i < stk.length; i++) {
             String clsid = stk[i].getClassName();
             if(clsid.startsWith("java.") || clsid.startsWith("sun.") || clsid.startsWith("org.dynmap.diag."))
                 continue;
-            sb.append("\n" + clsid + " :" + stk[i].getMethodName() + " (" + stk[i].getFileName() + ":" + stk[i].getLineNumber() + ")");
+            try {
+                Class<?> cls = Class.forName(clsid);
+                String pluginid = cload.get(cls.getClassLoader());
+                if(pluginid != null) {
+                    if(plugin == null) {
+                        plugin = pluginid;
+                    }
+                    else if(!plugin.equals(lastplugin)) {
+                        plugin = pluginid + ",<br>called by " + plugin;
+                    }
+                    lastplugin = pluginid;
+                    rec.pluginfound = true;
+                }
+            } catch (ClassNotFoundException cnfx) {
+            }
+            if(incstack) {
+                sb.append("<br>" + clsid + " :" + stk[i].getMethodName() + " (" + stk[i].getFileName() + ":" + stk[i].getLineNumber());
+            }
         }
-        return sb.toString();
+        StringBuilder sb2 = new StringBuilder();
+        if(plugin != null) {
+            sb2.append("Associated plugin(s):<br>").append(plugin);
+        }
+        else {
+            sb2.append(NOPLUGINMSG);
+        }
+        if(incstack) {
+            sb2.append("<br>Stack:").append(sb);
+        }
+        return sb2.toString();
     }
     /**
      * Find all contiguous blocks, set in target and clear in source
@@ -151,30 +194,28 @@ public class DynmapDiagPlugin extends JavaPlugin {
     }
     
     /* Handle entities on specific world */
-    private void handleEntitiesOnWorld(World w, Map<String, Marker> newmap) {
+    private void handleEntitiesOnWorld(World w, Map<String, Marker> newmap,IdentityHashMap<ClassLoader, String> cload) {
+        if(entityset == null) return;
+        
         int idx = 0;
         
-        List<Entity> ents = w.getEntities();
-
-        info("entities in " + w.getName() + ": " + ents.size());
         for(Entity ent : w.getEntities()) {
             Location loc = ent.getLocation();
             /* See if entity that is in unloaded chunk */
             if(w.isChunkLoaded(loc.getBlockX() >> 4, loc.getBlockZ() >> 4) == false) {
-                info("orpahn: " + ent.toString());
                 String id = "orphan_" + idx;
                 Marker m = resmarkers.remove(id);
                 String trc;
                 EntityRecord rec = entrecs.get(ent.getEntityId());
                 if(rec != null)
-                    trc = buildTrace(rec.load_stack);
+                    trc = buildTrace(rec, cload, this.include_stack_entities);
                 else
-                    trc = "unknown loader";
+                    trc = NOPLUGINMSG;
                 
                 if(m == null) { /* Not found?  Need new one */
-                    m = set.createMarker(id, ent.getClass().getName(), w.getName(), 
+                    m = entityset.createMarker(id, ent.getClass().getName(), w.getName(), 
                             loc.getX(), loc.getY(), loc.getZ(), 
-                            markerapi.getMarkerIcon(MarkerIcon.DEFAULT), false);
+                            entitymarker, false);
                 }
                 else {  /* Else, update position if needed */
                     m.setLocation(w.getName(), loc.getX(), loc.getY(), loc.getZ());
@@ -189,7 +230,9 @@ public class DynmapDiagPlugin extends JavaPlugin {
     }
     
     /* Handle chunks on specific world */
-    private void handleChunksOnWorld(World w, Map<String, AreaMarker> newmap) {
+    private void handleChunksOnWorld(World w, Map<String, AreaMarker> newmap, IdentityHashMap<ClassLoader, String> cload) {
+        if(set == null) return;
+        
         double[] x = null;
         double[] z = null;
         int poly_index = 0; /* Index of polygon for given faction */
@@ -198,6 +241,7 @@ public class DynmapDiagPlugin extends JavaPlugin {
         Chunk[] chks = w.getLoadedChunks();
         /* Now, find who loaded these - group into sets */
         HashMap<String, LinkedList<Chunk>> chunks_by_loader = new HashMap<String, LinkedList<Chunk>>();
+        HashSet<String> plugins = new HashSet<String>();
         for(Chunk c : chks) {
             String chunkid = idForChunk(c);
             if(c.isLoaded() == false) {
@@ -207,13 +251,10 @@ public class DynmapDiagPlugin extends JavaPlugin {
             ChunkRecord rec = chunkrecs.get(chunkid);
             String id;
             if(rec != null) {
-                id = buildTrace(rec.load_stack);
-                if(rec.unload_stack != null) {
-                    log.info("Loaded chunk " + chunkid + " was loaded by: " + id + ", unloaded by: " + buildTrace(rec.unload_stack));
-                }
+                id = buildTrace(rec, cload, this.include_stack_chunk);
             }
             else {
-                id = "unknown";
+                id = NOPLUGINMSG;
             }
             LinkedList<Chunk> ll = chunks_by_loader.get(id);
             if(ll == null) {
@@ -221,10 +262,14 @@ public class DynmapDiagPlugin extends JavaPlugin {
                 chunks_by_loader.put(id, ll);
             }
             ll.add(c);
+            if((rec != null) && rec.pluginfound) {
+                plugins.add(id);
+            }
         }
         /* Now, one outline set for each loader */
         for(String loaderid : chunks_by_loader.keySet()) {
-            label = "Loaded by: " + loaderid;
+            label = loaderid;
+            boolean plugin = plugins.contains(label);
             LinkedList<Chunk> ourchunks = chunks_by_loader.get(loaderid);
             LinkedList<Chunk> nodevals = new LinkedList<Chunk>();
             TileFlags curblks = new TileFlags();
@@ -349,7 +394,7 @@ public class DynmapDiagPlugin extends JavaPlugin {
                     /* Find existing one */
                     AreaMarker m = resareas.remove(polyid); /* Existing area? */
                     if(m == null) {
-                        m = set.createAreaMarker(polyid, label, false, w.getName(), x, z, false);
+                        m = set.createAreaMarker(polyid, "Chunks", false, w.getName(), x, z, false);
                         if(m == null) {
                             info("error adding area marker " + polyid);
                             return;
@@ -357,10 +402,10 @@ public class DynmapDiagPlugin extends JavaPlugin {
                     }
                     else {
                         m.setCornerLocations(x, z); /* Replace corner locations */
-                        m.setLabel(label);   /* Update label */
                     }
+                    m.setDescription(label);
                     /* Set line and fill properties */
-                    addStyle(label, m);
+                    addStyle(m, plugin);
 
                     /* Add to map */
                     newmap.put(polyid, m);
@@ -375,10 +420,16 @@ public class DynmapDiagPlugin extends JavaPlugin {
         Map<String,AreaMarker> newmap = new HashMap<String,AreaMarker>(); /* Build new map */
         Map<String, Marker> newmap2 = new HashMap<String,Marker>();
         
+        /* Find class loaders for loaded plugins */
+        IdentityHashMap<ClassLoader, String> cloaders = new IdentityHashMap<ClassLoader, String>();
+        for(Plugin p : getServer().getPluginManager().getPlugins()) {
+            if(p == this) continue;
+            cloaders.put(p.getClass().getClassLoader(), p.getName());
+        }
         /* Loop through worlds */
         for(World w : getServer().getWorlds()) {
-            handleChunksOnWorld(w, newmap);
-            handleEntitiesOnWorld(w, newmap2);
+            handleChunksOnWorld(w, newmap, cloaders);
+            handleEntitiesOnWorld(w, newmap2, cloaders);
         }
         
         /* Now, review old map - anything left is gone */
@@ -395,18 +446,16 @@ public class DynmapDiagPlugin extends JavaPlugin {
         getServer().getScheduler().scheduleSyncDelayedTask(this, new ChunkUpdate(), updperiod);
         
     }
-    
-    private static class ChunkRecord {
-        long    load_time;
+    private static class Record {
         StackTraceElement[] load_stack;
-        long    unload_time;
-        StackTraceElement[] unload_stack;
+        boolean pluginfound;
+    }
+    
+    private static class ChunkRecord extends Record {
     }
     private HashMap<String, ChunkRecord> chunkrecs = new HashMap<String, ChunkRecord>();
 
-    private static class EntityRecord {
-        long    load_time;
-        StackTraceElement[] load_stack;
+    private static class EntityRecord extends Record {
     }
     private HashMap<Integer, EntityRecord> entrecs = new HashMap<Integer, EntityRecord>();
     
@@ -415,7 +464,6 @@ public class DynmapDiagPlugin extends JavaPlugin {
     }
     
     private class OurServerListener implements Listener {
-        @SuppressWarnings("unused")
         @EventHandler
         public void onPluginEnable(PluginEnableEvent event) {
             Plugin p = event.getPlugin();
@@ -431,9 +479,6 @@ public class DynmapDiagPlugin extends JavaPlugin {
             /* Get stack */
             ChunkRecord rec = new ChunkRecord();
             rec.load_stack = Thread.currentThread().getStackTrace();
-            rec.load_time = System.currentTimeMillis();
-            rec.unload_stack = null;
-            rec.unload_time = 0;
             String chunkid = idForChunk(c);
             chunkrecs.put(chunkid,  rec);
         }
@@ -445,14 +490,11 @@ public class DynmapDiagPlugin extends JavaPlugin {
             if(rec == null) {
                 return;
             }
-            rec.unload_time = System.currentTimeMillis();
-            rec.unload_stack = Thread.currentThread().getStackTrace();
         }
         @EventHandler(priority=EventPriority.MONITOR)
         public void onCreatureSpawn(CreatureSpawnEvent event) {
             if(event.isCancelled()) return;
             EntityRecord rec = new EntityRecord();
-            rec.load_time = System.currentTimeMillis();
             rec.load_stack = Thread.currentThread().getStackTrace();
             entrecs.put(event.getEntity().getEntityId(),  rec);
         }
@@ -492,24 +534,47 @@ public class DynmapDiagPlugin extends JavaPlugin {
         this.saveConfig();  /* Save updates, if needed */
         
         /* Now, add marker set for chunks (make it transient) */
-        set = markerapi.getMarkerSet("diags_chunks.markerset");
-        if(set == null)
-            set = markerapi.createMarkerSet("diags_chunks.markerset", cfg.getString("chunklayer.name", "Loaded Chunks"), null, false);
-        else
-            set.setMarkerSetLabel(cfg.getString("chunklayer.name", "Loaded Chunks"));
-        if(set == null) {
-            severe("Error creating marker set");
-            return;
+        if(cfg.getBoolean("chunklayer.enabled", true)) {
+            set = markerapi.getMarkerSet("diags_chunks.markerset");
+            if(set == null)
+                set = markerapi.createMarkerSet("diags_chunks.markerset", cfg.getString("chunklayer.name", "Loaded Chunks"), null, false);
+            else
+                set.setMarkerSetLabel(cfg.getString("chunklayer.name", "Loaded Chunks"));
+            if(set == null) {
+                severe("Error creating marker set");
+                return;
+            }
+            int minzoom = cfg.getInt("chunklayer.minzoom", 0);
+            if(minzoom > 0)
+                set.setMinZoom(minzoom);
+            set.setLayerPriority(cfg.getInt("chunklayer.layerprio", 10));
+            set.setHideByDefault(cfg.getBoolean("chunklayer.hidebydefault", false));
+
+            /* Get style information */
+            defstyle = new AreaStyle(cfg, "chunkstyle");
+            
+            this.include_stack_chunk = cfg.getBoolean("chunklayer.include-stack", false);
         }
-        int minzoom = cfg.getInt("chunklayer.minzoom", 0);
-        if(minzoom > 0)
-            set.setMinZoom(minzoom);
-        set.setLayerPriority(cfg.getInt("chunklayer.layerprio", 10));
-        set.setHideByDefault(cfg.getBoolean("chunklayer.hidebydefault", false));
-
-        /* Get style information */
-        defstyle = new AreaStyle(cfg, "regionstyle");
-
+        /* Now, add marker set for entities (make it transient) */
+        if(cfg.getBoolean("entitylayer.enabled", true)) {
+            entityset = markerapi.getMarkerSet("diags_entities.markerset");
+            if(entityset == null)
+                entityset = markerapi.createMarkerSet("diags_entities.markerset", cfg.getString("entitylayer.name", "Leaked Entities"), null, false);
+            else
+                entityset.setMarkerSetLabel(cfg.getString("entitylayer.name", "Leaked Entities"));
+            if(entityset == null) {
+                severe("Error creating marker set");
+                return;
+            }
+            entitymarker = markerapi.getMarkerIcon(cfg.getString("entitylayer.marker", MarkerIcon.DEFAULT));
+            int minzoom = cfg.getInt("entitylayer.minzoom", 0);
+            if(minzoom > 0)
+                entityset.setMinZoom(minzoom);
+            entityset.setLayerPriority(cfg.getInt("entitylayer.layerprio", 10));
+            entityset.setHideByDefault(cfg.getBoolean("entitylayer.hidebydefault", false));
+            this.include_stack_entities = cfg.getBoolean("entitylayer.include-stack", false);
+        }
+        
         /* Set up update job - based on perion */
         int per = cfg.getInt("update.chunkperiod", 30);
         if(per < 15) per = 15;
@@ -525,6 +590,10 @@ public class DynmapDiagPlugin extends JavaPlugin {
         if(set != null) {
             set.deleteMarkerSet();
             set = null;
+        }
+        if(entityset != null) {
+            entityset.deleteMarkerSet();
+            entityset = null;
         }
         resareas.clear();
         stop = true;
