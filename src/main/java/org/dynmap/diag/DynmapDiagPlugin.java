@@ -228,9 +228,11 @@ public class DynmapDiagPlugin extends JavaPlugin {
                     m.setLocation(w.getName(), loc.getX(), loc.getY(), loc.getZ());
                     m.setLabel(ent.getClass().getName());
                 }
-                m.setDescription("Class:" + ent.getClass().getName() + "<br/>" + trc);
+                if (m != null) {
+                    m.setDescription("Class:" + ent.getClass().getName() + "<br/>" + trc);
                 
-                newmap.put(id, m);
+                    newmap.put(id, m);
+                }
                 idx++;
             }
         }
